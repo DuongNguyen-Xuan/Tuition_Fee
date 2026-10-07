@@ -1,0 +1,23 @@
+# Local databases and exports
+*.sql
+*.sql.gz
+*.dump
+*.backup
+*.csv
+*.xlsx
+
+# Runtime logs and local environment
+*.log
+.env
+.env.*
+!.env.example
+
+# Python-generated files
+__pycache__/
+*.py[cod]
+
+# Editor and operating-system files
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
