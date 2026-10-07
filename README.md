@@ -27,6 +27,8 @@ Dashboard Ban giám hiệu: `http://127.0.0.1:5000/dashboard/ban-giam-hieu`. Das
 
 Dashboard Trưởng phòng Kế toán: `http://127.0.0.1:5000/dashboard/truong-phong-ke-toan`. Dashboard có bộ lọc năm học, học kỳ, cơ sở; bấm cột hoặc điểm biểu đồ để xem giao dịch/chi tiết hoàn phí tương ứng.
 
+Dashboard Kế toán viên: `http://127.0.0.1:5000/dashboard/ke-toan-vien`. Tra cứu giao dịch theo mã/tên học sinh và khoảng ngày; xem đối soát theo ngày hạch toán và chi tiết hoàn phí. Dữ liệu mã/tên học sinh là thông tin cá nhân, chỉ dùng nội bộ.
+
 ## Lấy dữ liệu trong Power BI Desktop
 
 Chọn **Get Data → Web**, rồi nhập URL JSON của bảng muốn dùng. Ví dụ:
@@ -44,6 +46,8 @@ http://127.0.0.1:5000/api/powerbi/tuition-monthly
 ```
 
 Endpoint này không trả mã học sinh. Phân tích nghiệp vụ, định nghĩa chỉ số và lưu ý về kỳ kế hoạch được ghi tại [TUITION_BUSINESS_ANALYSIS.md](TUITION_BUSINESS_ANALYSIS.md).
+
+API tra cứu nghiệp vụ cho Kế toán viên: `/api/accounting/clerk?dataset=transactions&from=2026-08-01&to=2026-09-30&q=ma-hoac-ten-hoc-sinh`, `/api/accounting/clerk?dataset=refunds&from=2026-08-01&to=2026-09-30&q=ma-hoac-ten-hoc-sinh`. Metadata mặc định (ba năm học gần nhất): `/api/accounting/clerk?dataset=meta`.
 
 Để tự dựng biểu đồ kế toán trong Power BI, chọn **Get Data → Web** và nạp riêng từng mảng JSON sau:
 

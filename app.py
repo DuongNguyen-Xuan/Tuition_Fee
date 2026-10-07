@@ -597,6 +597,205 @@ def accounting_dashboard():
     return render_template_string(ACCOUNTING_DASHBOARD)
 
 
+@app.get("/api/accounting/clerk")
+def clerk_dashboard_data():
+    dataset = request.args.get("dataset", "meta").strip().lower()
+    if dataset not in {"meta", "transactions", "refunds"}:
+        return jsonify({"error": "dataset phải là meta, transactions hoặc refunds."}), 400
+
+    try:
+        start_value = request.args.get("from", "").strip()
+        end_value = request.args.get("to", "").strip()
+        start_date = date.fromisoformat(start_value) if start_value else None
+        end_date = date.fromisoformat(end_value) if end_value else None
+        if start_date and end_date and start_date > end_date:
+            return jsonify({"error": "Ngày bắt đầu không được sau ngày kết thúc."}), 400
+        search = request.args.get("q", "").strip()
+        if len(search) > 100:
+            return jsonify({"error": "Từ khóa tìm kiếm tối đa 100 ký tự."}), 400
+        pattern = f"%{search}%"
+
+        with connect_db() as conn:
+            years = conn.execute(
+                """SELECT y.id, y.name, MAX(y.start_at) AS year_start
+                   FROM tuition.tuition_fee_transaction tx
+                   LEFT JOIN public.school_month m
+                     ON m.id = tx.month_id AND m.school_id = tx.school_id
+                   JOIN public.school_term t
+                     ON t.id = COALESCE(tx.school_term_id, m.school_term_id)
+                    AND t.school_id = tx.school_id AND t.deleted_at IS NULL
+                   JOIN public.school_year y
+                     ON y.id = t.school_year_id AND y.school_id = t.school_id
+                    AND y.deleted_at IS NULL
+                   WHERE tx.deleted_at IS NULL
+                   GROUP BY y.id, y.name
+                   ORDER BY MAX(y.start_at) DESC
+                   LIMIT 3"""
+            ).fetchall()
+            if not years:
+                return jsonify({"error": "Không tìm thấy giao dịch học phí thuộc năm học."}), 404
+
+            year_ids = [row[0] for row in years]
+            year_names = [row[1] for row in years]
+            date_bounds = conn.execute(
+                """SELECT MIN(tx.accounting_date::date),
+                          LEAST(CURRENT_DATE, MAX(tx.accounting_date::date))
+                   FROM tuition.tuition_fee_transaction tx
+                   JOIN public.school_month m
+                     ON m.id = tx.month_id AND m.school_id = tx.school_id
+                   JOIN public.school_term t
+                     ON t.id = COALESCE(tx.school_term_id, m.school_term_id)
+                    AND t.school_id = tx.school_id AND t.deleted_at IS NULL
+                   WHERE tx.deleted_at IS NULL AND t.school_year_id = ANY(%s)
+                     AND tx.accounting_date::date <= CURRENT_DATE""",
+                (year_ids,),
+            ).fetchone()
+            default_from = date_bounds[0]
+            default_to = date_bounds[1] or date.today()
+            start_date = start_date or default_from
+            end_date = end_date or default_to
+            if start_date and start_date > end_date:
+                return jsonify({"error": "Khoảng ngày chọn không có thứ tự hợp lệ."}), 400
+
+            if dataset == "meta":
+                return jsonify({
+                    "years": year_names,
+                    "from": start_date.isoformat() if start_date else "",
+                    "to": end_date.isoformat() if end_date else "",
+                })
+
+            if dataset == "transactions":
+                query = """SELECT tx.accounting_date, y.name AS school_year,
+                                  t.name AS term_name, m.name AS month_name,
+                                  s.name AS school_name,
+                                  COALESCE(ps.user_code, '') AS student_code,
+                                  COALESCE(u.full_name, '') AS student_name,
+                                  tx.total_debit, tx.total_credit,
+                                  COALESCE(pm.name, 'Chưa xác định') AS payment_method,
+                                  tx.accounting_number, tx.transaction_ref_no,
+                                  tx.transaction_content, tx.is_valid_transaction,
+                                  tx.is_scanned
+                           FROM tuition.tuition_fee_transaction tx
+                           LEFT JOIN public.school_month m
+                             ON m.id = tx.month_id AND m.school_id = tx.school_id
+                           JOIN public.school_term t
+                             ON t.id = COALESCE(tx.school_term_id, m.school_term_id)
+                            AND t.school_id = tx.school_id AND t.deleted_at IS NULL
+                           JOIN public.school_year y
+                             ON y.id = t.school_year_id AND y.school_id = t.school_id
+                            AND y.deleted_at IS NULL
+                           LEFT JOIN public.school s
+                             ON s.id = tx.school_id AND s.deleted_at IS NULL
+                           LEFT JOIN public.users u
+                             ON u.id = tx.student_id AND u.deleted_at IS NULL
+                           LEFT JOIN LATERAL (
+                               SELECT p.user_code
+                               FROM public.profile_student p
+                               WHERE p.student_id = tx.student_id
+                                 AND p.deleted_at IS NULL
+                                 AND (p.school_id = tx.school_id OR p.school_id IS NULL)
+                               ORDER BY (p.school_id = tx.school_id) DESC,
+                                        p.updated_at DESC NULLS LAST, p.id DESC
+                               LIMIT 1
+                           ) ps ON TRUE
+                           LEFT JOIN public.tuition_fee_payment_method pm
+                             ON pm.id = tx.payment_method_id AND pm.deleted_at IS NULL
+                           WHERE tx.deleted_at IS NULL
+                             AND y.id = ANY(%s)
+                             AND tx.accounting_date::date >= %s
+                             AND tx.accounting_date::date <= %s
+                             AND (%s = ''
+                                  OR COALESCE(ps.user_code, '') ILIKE %s
+                                  OR COALESCE(u.full_name, '') ILIKE %s
+                                  OR tx.accounting_number ILIKE %s
+                                  OR COALESCE(tx.transaction_ref_no, '') ILIKE %s)
+                           ORDER BY tx.accounting_date DESC, tx.id DESC"""
+                fields = [
+                    "accounting_date", "school_year", "term_name", "month_name",
+                    "school_name", "student_code", "student_name", "total_debit",
+                    "total_credit", "payment_method", "accounting_number",
+                    "transaction_ref_no", "transaction_content",
+                    "is_valid_transaction", "is_scanned",
+                ]
+                rows = conn.execute(
+                    query,
+                    (year_ids, start_date, end_date, search, pattern, pattern, pattern, pattern),
+                ).fetchall()
+            else:
+                query = """SELECT r.date AS refund_date, y.name AS school_year,
+                                  cm.month_id, sm.name AS month_name,
+                                  s.name AS school_name, c.class_name,
+                                  COALESCE(dr.user_code, '') AS student_code,
+                                  COALESCE(u.full_name, '') AS student_name,
+                                  COALESCE(pc.description, pc.code, 'Chưa xác định') AS project_name,
+                                  r.refund_amount, d.total_days_not_used,
+                                  d.total_service_fee_per_day
+                           FROM tuition.tuition_report_service_detail_refund r
+                           JOIN tuition.tuition_report_service_detail_by_month d
+                             ON d.id = r.report_detail_by_month_id AND d.deleted_at IS NULL
+                           JOIN tuition.tuition_report_service_config_by_month cm
+                             ON cm.id = d.config_by_month_id AND cm.deleted_at IS NULL
+                           JOIN tuition.tuition_report_service_config_by_year cy
+                             ON cy.id = cm.config_by_year_id AND cy.deleted_at IS NULL
+                           JOIN public.school_year y
+                             ON y.id = cy.school_year_id AND y.school_id = cy.school_id
+                            AND y.deleted_at IS NULL
+                           LEFT JOIN public.school_month sm
+                             ON sm.id = cm.month_id AND sm.school_id = cm.school_id
+                           LEFT JOIN public.school s
+                             ON s.id = r.school_id AND s.deleted_at IS NULL
+                           LEFT JOIN public.tuition_fee_project_code pc
+                             ON pc.id = cy.project_id AND pc.deleted_at IS NULL
+                           LEFT JOIN public.tuition_fee_debt_record dr
+                             ON dr.id = d.debt_record_id AND dr.deleted_at IS NULL
+                           LEFT JOIN public.profile_student ps
+                             ON ps.user_code = dr.user_code AND ps.deleted_at IS NULL
+                           LEFT JOIN public.users u
+                             ON u.id = ps.student_id AND u.deleted_at IS NULL
+                           LEFT JOIN LATERAL (
+                               SELECT cl.name AS class_name
+                               FROM public.classroom_student cs
+                               JOIN public.classroom cl
+                                 ON cl.id = cs.classroom_id AND cl.deleted_at IS NULL
+                               WHERE cs.student_id = u.id AND cs.deleted_at IS NULL
+                                 AND cl.school_year_id = cy.school_year_id
+                               ORDER BY cs.id DESC
+                               LIMIT 1
+                           ) c ON TRUE
+                           WHERE r.deleted_at IS NULL AND y.id = ANY(%s)
+                             AND r.date::date >= %s AND r.date::date <= %s
+                             AND (%s = ''
+                                  OR COALESCE(dr.user_code, '') ILIKE %s
+                                  OR COALESCE(u.full_name, '') ILIKE %s
+                                  OR COALESCE(c.class_name, '') ILIKE %s
+                                  OR COALESCE(pc.description, pc.code, '') ILIKE %s)
+                           ORDER BY r.date DESC, r.id DESC"""
+                fields = [
+                    "refund_date", "school_year", "month_id", "month_name",
+                    "school_name", "class_name", "student_code", "student_name",
+                    "project_name", "refund_amount", "total_days_not_used",
+                    "total_service_fee_per_day",
+                ]
+                rows = conn.execute(
+                    query,
+                    (year_ids, start_date, end_date, search, pattern, pattern, pattern, pattern),
+                ).fetchall()
+
+        return jsonify([
+            {name: json_value(value) for name, value in zip(fields, row)}
+            for row in rows
+        ])
+    except ValueError as exc:
+        return jsonify({"error": f"Tham số không hợp lệ: {exc}"}), 400
+    except psycopg.Error as exc:
+        return jsonify({"error": f"Không truy vấn được dữ liệu kế toán viên: {exc}"}), 503
+
+
+@app.get("/dashboard/ke-toan-vien")
+def clerk_dashboard():
+    return render_template_string(CLERK_DASHBOARD)
+
+
 @app.get("/export.csv")
 def export_csv():
     schema, table, error = requested_table()
@@ -623,6 +822,128 @@ def export_csv():
         return jsonify({"error": str(exc)}), 400
 
 
+CLERK_DASHBOARD = r"""<!doctype html>
+<html lang="vi"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tra cứu học phí | Kế toán viên</title>
+<style>
+:root{font-family:"Segoe UI",Arial,sans-serif;color:#172033;background:#f3f6fb}*{box-sizing:border-box}
+body{margin:0}header{background:#172554;color:white;padding:24px max(24px,calc((100vw - 1440px)/2))}
+header h1{margin:0 0 5px;font-size:25px}header p{margin:0;color:#dbeafe}
+.home-link{display:inline-block;color:#dbeafe;font-size:13px;margin-bottom:10px;text-decoration:none}
+main{max-width:1440px;margin:22px auto;padding:0 20px}
+.toolbar{display:flex;align-items:end;gap:12px;flex-wrap:wrap;padding:14px;background:white;border:1px solid #e1e7f0;border-radius:10px;margin-bottom:16px}
+.toolbar label{font-size:13px;font-weight:600;color:#475569}.toolbar input{display:block;margin-top:5px;padding:9px 10px;min-width:170px;border:1px solid #cbd5e1;border-radius:7px;font:inherit}
+button{font:inherit}.toolbar button,.pager button{padding:9px 13px;border:0;border-radius:6px;background:#2563eb;color:#fff;cursor:pointer}.toolbar button:disabled,.pager button:disabled{opacity:.45;cursor:default}
+.status{display:none;padding:14px;background:#fff7ed;color:#9a3412;border-radius:8px;margin-bottom:14px}
+.cards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:16px}.card,.panel{background:white;border:1px solid #e1e7f0;border-radius:10px;box-shadow:0 3px 10px #12223b0a}
+.card{padding:15px}.card span{display:block;color:#64748b;font-size:13px}.card strong{display:block;margin-top:7px;font-size:20px;overflow-wrap:anywhere}
+.panel{padding:16px;margin-bottom:16px}.panel h2{font-size:17px;margin:0 0 4px}.panel>p{margin:0 0 10px;color:#64748b;font-size:12px}
+.chart svg{display:block;width:100%;height:auto;min-height:230px}.chart svg [data-clickable="true"]{cursor:pointer}.chart svg [data-clickable="true"]:hover{filter:brightness(.88)}
+.table-scroll{overflow:auto;max-height:480px;border:1px solid #e2e8f0;border-radius:6px}
+table{border-collapse:collapse;width:100%;white-space:nowrap;font-size:13px}th,td{padding:8px 10px;border-bottom:1px solid #e8edf4;text-align:left}th{background:#eaf0f8;position:sticky;top:0;z-index:1}td.num{text-align:right;font-variant-numeric:tabular-nums}
+.pager{display:flex;align-items:center;justify-content:flex-end;gap:10px;margin-top:10px;color:#64748b;font-size:13px}
+.note{color:#64748b;font-size:12px;margin-top:9px}.empty{text-align:center;padding:32px;color:#64748b}
+footer{padding:8px 0 28px;color:#64748b;font-size:12px}
+@media(max-width:900px){.cards{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:520px){header{padding:20px}main{padding:0 12px}.cards{grid-template-columns:1fr 1fr;gap:8px}.card{padding:11px}.card strong{font-size:17px}.toolbar input{min-width:140px;width:100%}}
+</style></head>
+<body>
+<header><a class="home-link" href="/dashboard">← Chọn đối tượng</a><h1>Tra cứu và đối soát học phí</h1><p>Kế toán viên · Giao dịch theo học sinh, ngày hạch toán và chi tiết hoàn phí</p></header>
+<main>
+ <form class="toolbar" id="filters">
+  <label>Từ ngày<input id="fromDate" type="date"></label>
+  <label>Đến ngày<input id="toDate" type="date"></label>
+  <label>Mã hoặc tên học sinh<input id="studentSearch" type="search" maxlength="100" placeholder="Nhập mã hoặc tên học sinh"></label>
+  <button id="searchButton" type="submit">Tra cứu</button>
+ </form>
+ <div id="status" class="status" role="alert"></div>
+ <section class="cards" aria-label="Tổng quan kết quả tra cứu">
+  <div class="card"><span>Số giao dịch</span><strong id="txCount">—</strong></div>
+  <div class="card"><span>Số học sinh có giao dịch</span><strong id="studentCount">—</strong></div>
+  <div class="card"><span>Tổng ghi nợ</span><strong id="debitTotal">—</strong></div>
+  <div class="card"><span>Tổng ghi có</span><strong id="creditTotal">—</strong></div>
+ </section>
+ <section class="panel chart"><h2>Giao dịch theo ngày hạch toán</h2><p>Bấm cột để lọc danh sách giao dịch trong ngày đó. Ngày dùng theo ngày hạch toán trong dữ liệu.</p><div id="dailyChart"></div></section>
+ <section class="panel"><h2>Chi tiết giao dịch theo học sinh</h2><p>Tra cứu bằng mã/tên học sinh; gồm ngày, kỳ/tháng, ghi nợ/ghi có, phương thức và mã đối chiếu.</p>
+  <div class="table-scroll"><table><thead><tr><th>Ngày hạch toán</th><th>Năm học</th><th>Học kỳ</th><th>Tháng</th><th>Cơ sở</th><th>Mã học sinh</th><th>Tên học sinh</th><th>Ghi nợ</th><th>Ghi có</th><th>Phương thức</th><th>Số hạch toán</th><th>Mã tham chiếu</th><th>Hợp lệ</th><th>Đã quét</th></tr></thead><tbody id="transactions"></tbody></table></div>
+  <div class="pager"><button id="txPrev" type="button">Trước</button><span id="txPage"></span><button id="txNext" type="button">Sau</button></div>
+  <p class="note" id="txNote"></p>
+ </section>
+ <section class="panel"><h2>Chi tiết các khoản hoàn phí</h2><p>Tra cứu theo khoảng ngày và học sinh; gồm lớp, cơ sở, tháng, dự án dịch vụ và ngày chưa sử dụng.</p>
+  <div class="table-scroll"><table><thead><tr><th>Ngày hoàn</th><th>Năm học</th><th>Tháng dịch vụ</th><th>Cơ sở</th><th>Mã học sinh</th><th>Tên học sinh</th><th>Lớp</th><th>Dự án dịch vụ</th><th>Ngày chưa sử dụng</th><th>Phí/ngày</th><th>Số tiền hoàn</th></tr></thead><tbody id="refunds"></tbody></table></div>
+  <div class="pager"><button id="refundPrev" type="button">Trước</button><span id="refundPage"></span><button id="refundNext" type="button">Sau</button></div>
+  <p class="note" id="refundNote"></p>
+ </section>
+ <footer>Dữ liệu giới hạn trong ba năm học gần nhất. Tên và mã học sinh là dữ liệu cá nhân, chỉ sử dụng cho nghiệp vụ nội bộ và không chia sẻ báo cáo ra ngoài phạm vi được phép.</footer>
+</main>
+<script>
+const API="/api/accounting/clerk",pageSize=100,svgNS="http://www.w3.org/2000/svg";
+const money=new Intl.NumberFormat("vi-VN",{maximumFractionDigits:0}),shortMoney=new Intl.NumberFormat("vi-VN",{notation:"compact",maximumFractionDigits:1});
+let transactions=[],refunds=[],txPage=0,refundPage=0;
+function total(rows,key){return rows.reduce((n,r)=>n+(Number(r[key])||0),0)}
+function td(row,value,cls){const cell=document.createElement("td");cell.textContent=value===null||value===undefined||value===""?"—":String(value);if(cls)cell.className=cls;row.appendChild(cell)}
+function addCell(row,value,format){let text=value;if(format==="money")text=money.format(Number(value)||0)+" ₫";else if(format==="date")text=value?String(value).slice(0,10):"";else if(format==="bool")text=value?"Có":"Không";td(row,text,format==="money"?"num":"")}
+function renderTable(bodyId,rows,columns,page){const body=document.getElementById(bodyId);body.replaceChildren();rows.slice(page*pageSize,(page+1)*pageSize).forEach(record=>{const row=document.createElement("tr");columns.forEach(([key,format])=>addCell(row,record[key],format));body.appendChild(row)})}
+function groupByDate(rows){const map=new Map();rows.forEach(r=>{const key=String(r.accounting_date||"").slice(0,10);if(!key)return;if(!map.has(key))map.set(key,{date:key,debit:0,credit:0,count:0});const g=map.get(key);g.debit+=Number(r.total_debit)||0;g.credit+=Number(r.total_credit)||0;g.count++});return [...map.values()].sort((a,b)=>a.date.localeCompare(b.date))}
+function drawDailyChart(days){
+ const target=document.getElementById("dailyChart");target.replaceChildren();if(!days.length){const empty=document.createElement("div");empty.className="empty";empty.textContent="Không có giao dịch trong khoảng lọc.";target.appendChild(empty);return}
+ const svg=document.createElementNS(svgNS,"svg");svg.setAttribute("viewBox","0 0 960 300");svg.setAttribute("role","img");target.appendChild(svg);
+ const W=960,H=300,L=80,R=20,T=24,B=56,pw=W-L-R,ph=H-T-B,max=Math.max(1,...days.flatMap(d=>[d.debit,d.credit]));
+ for(let n=0;n<=4;n++){const y=T+ph*n/4;const line=document.createElementNS(svgNS,"line");line.setAttribute("x1",L);line.setAttribute("x2",W-R);line.setAttribute("y1",y);line.setAttribute("y2",y);line.setAttribute("stroke","#e8edf4");svg.appendChild(line);const label=document.createElementNS(svgNS,"text");label.setAttribute("x",L-8);label.setAttribute("y",y+4);label.setAttribute("text-anchor","end");label.setAttribute("fill","#64748b");label.setAttribute("font-size","12");label.textContent=shortMoney.format(max*(4-n)/4);svg.appendChild(label)}
+ const slot=pw/days.length,groupWidth=Math.min(slot*.72,76),barWidth=groupWidth/2;
+ days.forEach((d,i)=>{[[d.debit,"#2563eb","Ghi nợ"],[d.credit,"#14b8a6","Ghi có"]].forEach((item,j)=>{const h=Math.max(1,item[0]/max*ph),x=L+i*slot+(slot-groupWidth)/2+j*barWidth,y=T+ph-h;const rect=document.createElementNS(svgNS,"rect");rect.setAttribute("x",x);rect.setAttribute("y",y);rect.setAttribute("width",Math.max(2,barWidth-4));rect.setAttribute("height",h);rect.setAttribute("rx",3);rect.setAttribute("fill",item[1]);rect.setAttribute("data-clickable","true");rect.setAttribute("tabindex","0");rect.setAttribute("role","button");const title=document.createElementNS(svgNS,"title");title.textContent=`${d.date} · ${item[2]}: ${money.format(item[0])} ₫ · ${d.count} giao dịch · Bấm để xem`;rect.appendChild(title);const selectDate=()=>{document.getElementById("fromDate").value=d.date;document.getElementById("toDate").value=d.date;document.getElementById("filters").requestSubmit()};rect.addEventListener("click",selectDate);rect.addEventListener("keydown",event=>{if(event.key==="Enter"||event.key===" "){event.preventDefault();selectDate()}});svg.appendChild(rect)});if(i%Math.max(1,Math.ceil(days.length/12))===0||i===days.length-1){const label=document.createElementNS(svgNS,"text");label.setAttribute("x",L+i*slot+slot/2);label.setAttribute("y",H-B+20);label.setAttribute("text-anchor","middle");label.setAttribute("fill","#475569");label.setAttribute("font-size","11");label.textContent=d.date;svg.appendChild(label)}});
+ [["#2563eb","Ghi nợ"],["#14b8a6","Ghi có"]].forEach((item,i)=>{const x=L+i*110,box=document.createElementNS(svgNS,"rect");box.setAttribute("x",x);box.setAttribute("y",H-18);box.setAttribute("width",11);box.setAttribute("height",11);box.setAttribute("fill",item[0]);svg.appendChild(box);const text=document.createElementNS(svgNS,"text");text.setAttribute("x",x+17);text.setAttribute("y",H-8);text.setAttribute("fill","#475569");text.setAttribute("font-size","12");text.textContent=item[1];svg.appendChild(text)})
+}
+function render(){
+ const students=new Set(transactions.map(r=>r.student_code).filter(Boolean));
+ document.getElementById("txCount").textContent=money.format(transactions.length);
+ document.getElementById("studentCount").textContent=money.format(students.size);
+ document.getElementById("debitTotal").textContent=money.format(total(transactions,"total_debit"))+" ₫";
+ document.getElementById("creditTotal").textContent=money.format(total(transactions,"total_credit"))+" ₫";
+ drawDailyChart(groupByDate(transactions));
+ const txPages=Math.max(1,Math.ceil(transactions.length/pageSize));txPage=Math.min(txPage,txPages-1);
+ renderTable("transactions",transactions,[["accounting_date","date"],["school_year"],["term_name"],["month_name"],["school_name"],["student_code"],["student_name"],["total_debit","money"],["total_credit","money"],["payment_method"],["accounting_number"],["transaction_ref_no"],["is_valid_transaction","bool"],["is_scanned","bool"]],txPage);
+ document.getElementById("txPage").textContent=`Trang ${txPage+1} / ${txPages}`;
+ document.getElementById("txPrev").disabled=txPage===0;document.getElementById("txNext").disabled=txPage>=txPages-1;
+ document.getElementById("txNote").textContent=`${transactions.length.toLocaleString("vi-VN")} giao dịch phù hợp với bộ lọc.`;
+ const refundPages=Math.max(1,Math.ceil(refunds.length/pageSize));refundPage=Math.min(refundPage,refundPages-1);
+ renderTable("refunds",refunds,[["refund_date","date"],["school_year"],["month_name"],["school_name"],["student_code"],["student_name"],["class_name"],["project_name"],["total_days_not_used"],["total_service_fee_per_day","money"],["refund_amount","money"]],refundPage);
+ document.getElementById("refundPage").textContent=`Trang ${refundPage+1} / ${refundPages}`;
+ document.getElementById("refundPrev").disabled=refundPage===0;document.getElementById("refundNext").disabled=refundPage>=refundPages-1;
+ document.getElementById("refundNote").textContent=`${refunds.length.toLocaleString("vi-VN")} khoản hoàn phù hợp với bộ lọc.`;
+}
+async function loadData(){
+ const status=document.getElementById("status"),button=document.getElementById("searchButton");status.style.display="none";button.disabled=true;button.textContent="Đang tải...";
+ try{
+  const from=document.getElementById("fromDate").value,to=document.getElementById("toDate").value,q=document.getElementById("studentSearch").value.trim();
+  if(from&&to&&from>to)throw new Error("Ngày bắt đầu không được sau ngày kết thúc.");
+  const params=new URLSearchParams({from,to,q});
+  const [txResponse,refundResponse]=await Promise.all([fetch(`${API}?dataset=transactions&${params}`),fetch(`${API}?dataset=refunds&${params}`)]);
+  const txData=await txResponse.json(),refundData=await refundResponse.json();
+  if(!txResponse.ok)throw new Error(txData.error||"Không tải được giao dịch.");
+  if(!refundResponse.ok)throw new Error(refundData.error||"Không tải được hoàn phí.");
+  if(!Array.isArray(txData)||!Array.isArray(refundData))throw new Error("Dữ liệu trả về không đúng định dạng.");
+  transactions=txData;refunds=refundData;txPage=0;refundPage=0;render();
+ }catch(error){status.textContent=`Không tải được dữ liệu: ${error.message}`;status.style.display="block"}
+ finally{button.disabled=false;button.textContent="Tra cứu"}
+}
+async function start(){
+ const status=document.getElementById("status");
+ try{
+  const response=await fetch(`${API}?dataset=meta`),meta=await response.json();if(!response.ok)throw new Error(meta.error||"Không tải được kỳ dữ liệu.");
+  document.getElementById("fromDate").value=meta.from;document.getElementById("toDate").value=meta.to;
+  document.getElementById("filters").addEventListener("submit",event=>{event.preventDefault();loadData()});
+  document.getElementById("txPrev").addEventListener("click",()=>{txPage=Math.max(0,txPage-1);render()});
+  document.getElementById("txNext").addEventListener("click",()=>{txPage++;render()});
+  document.getElementById("refundPrev").addEventListener("click",()=>{refundPage=Math.max(0,refundPage-1);render()});
+  document.getElementById("refundNext").addEventListener("click",()=>{refundPage++;render()});
+  await loadData();
+ }catch(error){status.textContent=`Không tải được dashboard: ${error.message}`;status.style.display="block"}
+}
+start();
+</script></body></html>"""
+
+
 DASHBOARD_HOME = """<!doctype html>
 <html lang="vi"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Dashboard học phí | Chọn đối tượng</title>
@@ -644,6 +965,7 @@ footer{max-width:1120px;margin:0 auto;padding:20px;color:#64748b;font-size:12px}
 <section class="cards" aria-label="Chọn đối tượng dashboard">
  <a class="card" href="/dashboard/ban-giam-hieu"><span class="tag">Điều hành nhà trường</span><h2>Ban giám hiệu</h2><p>Tổng quan phải thu, thanh toán ghi nhận, dư nợ cuối kỳ, so sánh cơ sở và hoàn phí.</p><span class="link">Mở dashboard Ban giám hiệu →</span></a>
  <a class="card" href="/dashboard/truong-phong-ke-toan"><span class="tag">Đối soát và kiểm soát</span><h2>Trưởng phòng Kế toán</h2><p>Đối chiếu ghi nợ/ghi có, phương thức thanh toán, trạng thái giao dịch và chi tiết hoàn phí.</p><span class="link">Mở dashboard Kế toán →</span></a>
+ <a class="card" href="/dashboard/ke-toan-vien"><span class="tag">Tra cứu nghiệp vụ</span><h2>Kế toán viên</h2><p>Tra cứu giao dịch theo học sinh, đối soát theo ngày hạch toán và kiểm tra chi tiết hoàn phí.</p><span class="link">Mở dashboard Kế toán viên →</span></a>
 </section></main><footer>Dashboard sử dụng dữ liệu học phí PostgreSQL trên máy cục bộ.</footer></body></html>"""
 
 
