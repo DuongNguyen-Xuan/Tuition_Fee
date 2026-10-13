@@ -1,10 +1,10 @@
-# K12 Database Browser
+# K12 School Health Dashboards
 
-Ứng dụng Flask chạy cục bộ để duyệt bảng PostgreSQL, xem trước dữ liệu, thêm/sửa/xóa bản ghi và cung cấp JSON cho Power BI.
+Ứng dụng Flask gồm 11 dashboard y tế theo đối tượng sử dụng và trình duyệt bảng PostgreSQL dùng chung.
 
 ## Chạy ứng dụng
 
-Mở PowerShell tại thư mục này:
+Mở PowerShell tại thư mục dự án:
 
 ```powershell
 python -m pip install -r requirements.txt
@@ -17,60 +17,40 @@ $env:PGDATABASE = "K12_Staging_Local_Restore"
 python app.py
 ```
 
-Mở trang `http://127.0.0.1:5000`. Mặc định ứng dụng chỉ lắng nghe trên máy hiện tại.
+Mở trang chọn đối tượng: <http://127.0.0.1:5000/dashboard>.
 
-Chọn một bảng để xem dữ liệu. Nút **Thêm dòng** mở biểu mẫu tạo bản ghi; các nút **Sửa/Xóa** xuất hiện khi bảng có khóa chính. Cột tự tăng/được sinh tự động được để PostgreSQL quản lý. Ràng buộc khóa ngoại, NOT NULL và unique của PostgreSQL vẫn được áp dụng; lỗi sẽ hiện ngay trong biểu mẫu.
+## 11 dashboard theo đối tượng
 
-Trang dashboard chung, chọn đối tượng sử dụng: `http://127.0.0.1:5000/dashboard`.
+| Đối tượng | Đường dẫn |
+|---|---|
+| Ban giám hiệu | `/dashboard/ban-giam-hieu` |
+| Trưởng bộ phận y tế học đường | `/dashboard/truong-bo-phan-y-te` |
+| Nhân viên y tế / y tá trường học | `/dashboard/nhan-vien-y-te` |
+| Bác sĩ / đơn vị khám sức khỏe | `/dashboard/bac-si-don-vi-kham` |
+| Phụ trách BHYT học sinh | `/dashboard/phu-trach-bhyt` |
+| Điều phối tiêm chủng | `/dashboard/dieu-phoi-tiem-chung` |
+| Phụ trách quản lý thuốc tại trường | `/dashboard/quan-ly-thuoc` |
+| Giáo viên chủ nhiệm | `/dashboard/giao-vien-chu-nhiem` |
+| Phụ huynh / người giám hộ | `/dashboard/phu-huynh` |
+| Học sinh | `/dashboard/hoc-sinh` |
+| Phòng công tác học sinh | `/dashboard/cong-tac-hoc-sinh` |
 
-Dashboard Ban giám hiệu: `http://127.0.0.1:5000/dashboard/ban-giam-hieu`. Dashboard có 5 biểu đồ, mặc định chọn 3 năm học gần nhất có dữ liệu đã chốt; bấm cột hoặc điểm để xem số liệu chi tiết.
+Mỗi trang có mục tiêu nghiệp vụ, bộ chỉ số và biểu đồ phù hợp với vai trò. Trang bác sĩ/đơn vị khám, giáo viên chủ nhiệm, phụ huynh và học sinh đang khóa dữ liệu cho đến khi ứng dụng có đăng nhập, phân quyền theo lớp/học sinh và kiểm soát truy cập phù hợp.
 
-Dashboard Trưởng phòng Kế toán: `http://127.0.0.1:5000/dashboard/truong-phong-ke-toan`. Dashboard có bộ lọc năm học, học kỳ, cơ sở; bấm cột hoặc điểm biểu đồ để xem giao dịch/chi tiết hoàn phí tương ứng.
+## Dữ liệu và bảo mật
 
-Dashboard Kế toán viên: `http://127.0.0.1:5000/dashboard/ke-toan-vien`. Tra cứu giao dịch theo mã/tên học sinh và khoảng ngày; xem đối soát theo ngày hạch toán và chi tiết hoàn phí. Dữ liệu mã/tên học sinh là thông tin cá nhân, chỉ dùng nội bộ.
+Dashboard tổng hợp hồ sơ sức khỏe, khám nhanh, khám định kỳ, BHYT, sự kiện tiêm chủng và hồ sơ thuốc từ các bảng `medical_*`. API dashboard chỉ trả số liệu tổng hợp, không trả tên học sinh, triệu chứng, chẩn đoán hoặc thông tin liên hệ. Một số trường hợp chưa có dữ liệu nguồn (ví dụ bản ghi tiêm chủng) sẽ hiển thị 0; không suy ra tỷ lệ bao phủ nếu chưa có mẫu số học sinh đủ điều kiện.
 
-Dashboard Y tế học đường: `http://127.0.0.1:5000/dashboard/y-te`. Tổng hợp hồ sơ sức khỏe, khám nhanh/định kỳ, BHYT, tiêm chủng và hồ sơ thuốc theo khoảng ngày và cơ sở; biểu đồ theo tháng có thể bấm để lọc. Trang cũng ghi user story cho Ban giám hiệu, bộ phận/nhân viên y tế, đơn vị khám, phụ trách BHYT, điều phối tiêm chủng, giáo viên chủ nhiệm, phụ huynh, học sinh và công tác học sinh. API chỉ trả chỉ số tổng hợp, không trả danh sách học sinh hay nội dung chẩn đoán. Phân loại BHYT trong dashboard chỉ dựa trên ngày hết hạn, không thay thế trạng thái nghiệp vụ. Dữ liệu sức khỏe là dữ liệu nhạy cảm; ứng dụng hiện chưa có đăng nhập và phân quyền, do đó dashboard chỉ lắng nghe trên máy cục bộ và không được dùng để cấp quyền xem hồ sơ cá nhân.
+Dữ liệu sức khỏe là dữ liệu nhạy cảm. Ứng dụng hiện chưa có xác thực người dùng và phân quyền, vì vậy chỉ chạy trên máy cục bộ và không dùng để cung cấp hồ sơ cá nhân.
 
-## Lấy dữ liệu trong Power BI Desktop
+## Trình duyệt PostgreSQL và API dùng chung
 
-Chọn **Get Data → Web**, rồi nhập URL JSON của bảng muốn dùng. Ví dụ:
+Trang gốc <http://127.0.0.1:5000/> cho phép tìm bảng, xem dữ liệu, sửa/xóa theo khóa chính và xuất CSV. Các API dùng chung:
 
-```text
-http://127.0.0.1:5000/api/powerbi?schema=bus&table=bus_route&limit=100000&offset=0
-```
-
-API trả mảng JSON gồm các bản ghi có tên trường phù hợp với cột. Tối đa 100.000 dòng mỗi lần gọi; dùng `limit` và `offset` để lấy các phần tiếp theo.
-
-Để dùng dữ liệu học phí đã tổng hợp theo trường-tháng, kết nối URL sau:
-
-```text
-http://127.0.0.1:5000/api/powerbi/tuition-monthly
-```
-
-Endpoint này không trả mã học sinh. Phân tích nghiệp vụ, định nghĩa chỉ số và lưu ý về kỳ kế hoạch được ghi tại [TUITION_BUSINESS_ANALYSIS.md](TUITION_BUSINESS_ANALYSIS.md).
-
-API tra cứu nghiệp vụ cho Kế toán viên: `/api/accounting/clerk?dataset=transactions&from=2026-08-01&to=2026-09-30&q=ma-hoac-ten-hoc-sinh`, `/api/accounting/clerk?dataset=refunds&from=2026-08-01&to=2026-09-30&q=ma-hoac-ten-hoc-sinh`. Metadata mặc định (ba năm học gần nhất): `/api/accounting/clerk?dataset=meta`.
-
-Để tự dựng biểu đồ kế toán trong Power BI, chọn **Get Data → Web** và nạp riêng từng mảng JSON sau:
-
-```text
-http://127.0.0.1:5000/api/accounting/dashboard?dataset=transactions
-http://127.0.0.1:5000/api/accounting/dashboard?dataset=refunds
-```
-
-`transactions` trả giao dịch với năm học, học kỳ/tháng, cơ sở, phương thức, ghi nợ/ghi có và trạng thái; `refunds` trả chi tiết hoàn phí theo lớp, dự án dịch vụ và ngày. Cả hai nguồn được giới hạn ở ba năm học gần nhất. Dữ liệu hoàn phí có tên học sinh, chỉ dùng trong báo cáo kế toán được phân quyền phù hợp.
-
-## API
-
-- `/api/tables?q=bus` — tìm bảng theo tên schema hoặc bảng.
-- `/api/columns?schema=bus&table=bus_route` — xem các cột và kiểu dữ liệu.
-- `/api/data?schema=bus&table=bus_route&limit=100&offset=0` — xem dữ liệu dạng JSON; `limit` tối đa 1.000.
-- `/api/powerbi?schema=bus&table=bus_route&limit=100000&offset=0` — JSON record list cho Power BI Web connector.
-- `/api/powerbi/tuition-monthly?from=2026-01-01&to=2026-09-01&school_id=1` — dữ liệu học phí tổng hợp theo trường-tháng cho Power BI; mọi bộ lọc đều tùy chọn.
-- `/api/medical/dashboard?from=2024-01-01&to=2026-12-31&school_id=1` — chỉ số y tế tổng hợp theo khoảng ngày và cơ sở; không trả dữ liệu nhận diện cá nhân.
-- `/export.csv?schema=bus&table=bus_route` — tùy chọn xuất CSV.
-- `POST /api/rows` — thêm dòng; body JSON gồm `schema`, `table`, `values`.
-- `PUT /api/rows` — sửa dòng; body JSON gồm `schema`, `table`, `key` (các cột khóa chính) và `values`.
-- `DELETE /api/rows` — xóa dòng theo `schema`, `table` và `key`.
-
-Các thao tác thêm/sửa/xóa chỉ áp dụng cho bảng thường có thể ghi; sửa và xóa yêu cầu khóa chính. Tên schema/bảng được trích dẫn an toàn trước khi truy vấn.
+- `/api/tables?q=medical` — tìm bảng theo schema hoặc tên bảng.
+- `/api/columns?schema=public&table=medical_quick_examinations` — xem cấu trúc bảng.
+- `/api/data?schema=public&table=medical_quick_examinations&limit=100&offset=0` — xem dữ liệu JSON.
+- `/api/powerbi?schema=public&table=medical_quick_examinations&limit=100000&offset=0` — dữ liệu JSON cho Power BI Web connector.
+- `/api/medical/dashboard?from=2024-01-01&to=2026-12-31&school_id=3` — số liệu y tế tổng hợp theo ngày và cơ sở.
+- `/export.csv?schema=public&table=medical_quick_examinations` — xuất CSV.
+- `POST /api/rows`, `PUT /api/rows`, `DELETE /api/rows` — thao tác trên bảng PostgreSQL thường có thể ghi.
