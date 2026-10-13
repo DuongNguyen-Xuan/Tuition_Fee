@@ -458,6 +458,215 @@ def dashboard_home():
     return render_template_string(DASHBOARD_HOME)
 
 
+@app.get("/api/medical/dashboard")
+def medical_dashboard_data():
+    start_value = request.args.get("from", "").strip()
+    end_value = request.args.get("to", "").strip()
+    school_value = request.args.get("school_id", "").strip()
+    try:
+        start_date = date.fromisoformat(start_value) if start_value else None
+        end_date = date.fromisoformat(end_value) if end_value else None
+        school_id = int(school_value) if school_value else None
+        if school_id is not None and school_id < 1:
+            raise ValueError("school_id phải là số nguyên dương.")
+        if start_date and end_date and start_date > end_date:
+            raise ValueError("Ngày bắt đầu không được sau ngày kết thúc.")
+    except ValueError as exc:
+        return jsonify({"error": f"Tham số không hợp lệ: {exc}"}), 400
+
+    school_filter = school_id
+    start_filter = start_date
+    end_filter = end_date
+    try:
+        with connect_db() as conn:
+            schools = conn.execute(
+                """SELECT id, name FROM public.school
+                   WHERE deleted_at IS NULL
+                   ORDER BY name, id"""
+            ).fetchall()
+
+            health = conn.execute(
+                """SELECT COUNT(*), COUNT(DISTINCT user_id),
+                          COUNT(*) FILTER (WHERE NULLIF(BTRIM(di_ung), '') IS NOT NULL),
+                          COUNT(*) FILTER (WHERE NULLIF(BTRIM(current_disease), '') IS NOT NULL)
+                   FROM public.medical_student_health_records h
+                   WHERE h.deleted_at IS NULL
+                     AND (%s::integer IS NULL OR h.school_id = %s)
+                     AND (%s::date IS NULL OR h.created_at::date >= %s)
+                     AND (%s::date IS NULL OR h.created_at::date <= %s)""",
+                (school_filter, school_filter, start_filter, start_filter, end_filter, end_filter),
+            ).fetchone()
+
+            quick = conn.execute(
+                """SELECT COUNT(*), COUNT(DISTINCT user_id),
+                          COUNT(*) FILTER (WHERE status_send_to_parent::text = 'DA_GUI_CHO_PH'),
+                          COUNT(*) FILTER (WHERE status_send_to_parent::text = 'CHO_GVCN_XAC_NHAN')
+                   FROM public.medical_quick_examinations q
+                   WHERE q.deleted_at IS NULL
+                     AND (%s::integer IS NULL OR q.school_id = %s)
+                     AND (%s::date IS NULL OR q.day::date >= %s)
+                     AND (%s::date IS NULL OR q.day::date <= %s)""",
+                (school_filter, school_filter, start_filter, start_filter, end_filter, end_filter),
+            ).fetchone()
+
+            exams = conn.execute(
+                """SELECT COUNT(*), COUNT(DISTINCT user_id),
+                          AVG(bmi) FILTER (WHERE bmi > 0),
+                          COUNT(*) FILTER (WHERE NULLIF(BTRIM(z_score_bmi_conclude), '') IS NOT NULL)
+                   FROM public.medical_examination_generals e
+                   WHERE e.deleted_at IS NULL
+                     AND (%s::integer IS NULL OR e.school_id = %s)
+                     AND (%s::date IS NULL OR e.examination_date::date >= %s)
+                     AND (%s::date IS NULL OR e.examination_date::date <= %s)""",
+                (school_filter, school_filter, start_filter, start_filter, end_filter, end_filter),
+            ).fetchone()
+
+            bhyt = conn.execute(
+                """SELECT COUNT(*), COUNT(DISTINCT user_id),
+                          COUNT(DISTINCT user_id) FILTER (WHERE ngay_het_han::date >= CURRENT_DATE),
+                          COUNT(*) FILTER (WHERE ngay_het_han::date >= CURRENT_DATE
+                                             AND ngay_het_han::date < CURRENT_DATE + 30),
+                          COUNT(*) FILTER (WHERE ngay_het_han::date < CURRENT_DATE)
+                   FROM public.medical_manager_bhyts b
+                   WHERE b.deleted_at IS NULL
+                     AND (%s::integer IS NULL OR b.school_id = %s)
+                     AND (%s::date IS NULL OR COALESCE(b.ngay_hieu_luc, b.created_at)::date >= %s)
+                     AND (%s::date IS NULL OR COALESCE(b.ngay_hieu_luc, b.created_at)::date <= %s)""",
+                (school_filter, school_filter, start_filter, start_filter, end_filter, end_filter),
+            ).fetchone()
+
+            vaccination = conn.execute(
+                """SELECT COUNT(*),
+                          (SELECT COUNT(*)
+                           FROM public.medical_vaccination_records r
+                           JOIN public.medical_vaccination_events re
+                             ON re.id = r.medical_vaccination_event_id
+                            AND re.deleted_at IS NULL
+                           WHERE r.deleted_at IS NULL
+                             AND (%s::integer IS NULL OR r.school_id = %s)
+                             AND (%s::date IS NULL OR re.date::date >= %s)
+                             AND (%s::date IS NULL OR re.date::date <= %s)),
+                          (SELECT COUNT(DISTINCT r.user_id)
+                           FROM public.medical_vaccination_records r
+                           JOIN public.medical_vaccination_events re
+                             ON re.id = r.medical_vaccination_event_id
+                            AND re.deleted_at IS NULL
+                           WHERE r.deleted_at IS NULL
+                             AND (%s::integer IS NULL OR r.school_id = %s)
+                             AND (%s::date IS NULL OR re.date::date >= %s)
+                             AND (%s::date IS NULL OR re.date::date <= %s))
+                   FROM public.medical_vaccination_events v
+                   WHERE v.deleted_at IS NULL
+                     AND (%s::integer IS NULL OR v.school_id = %s)
+                     AND (%s::date IS NULL OR v.date::date >= %s)
+                     AND (%s::date IS NULL OR v.date::date <= %s)""",
+                (
+                    school_filter, school_filter, start_filter, start_filter, end_filter, end_filter,
+                    school_filter, school_filter, start_filter, start_filter, end_filter, end_filter,
+                    school_filter, school_filter, start_filter, start_filter, end_filter, end_filter,
+                ),
+            ).fetchone()
+
+            medicine = conn.execute(
+                """SELECT COUNT(DISTINCT m.id), COUNT(d.id),
+                          COUNT(DISTINCT m.id) FILTER (
+                              WHERE d.start_date::date <= CURRENT_DATE
+                                AND (d.end_date IS NULL OR d.end_date::date >= CURRENT_DATE))
+                   FROM public.medical_coach_medicines m
+                   LEFT JOIN public.medical_coach_medicine_details d
+                     ON d.medical_coach_medicine_id = m.id AND d.deleted_at IS NULL
+                   WHERE m.deleted_at IS NULL
+                     AND (%s::integer IS NULL OR m.school_id = %s)
+                     AND (%s::date IS NULL OR m.created_at::date >= %s)
+                     AND (%s::date IS NULL OR m.created_at::date <= %s)""",
+                (school_filter, school_filter, start_filter, start_filter, end_filter, end_filter),
+            ).fetchone()
+
+            series = conn.execute(
+                """SELECT 'Khám nhanh' AS category, date_trunc('month', q.day)::date AS period,
+                          COUNT(*) AS total
+                   FROM public.medical_quick_examinations q
+                   WHERE q.deleted_at IS NULL
+                     AND q.day IS NOT NULL
+                     AND (%s::integer IS NULL OR q.school_id = %s)
+                     AND (%s::date IS NULL OR q.day::date >= %s)
+                     AND (%s::date IS NULL OR q.day::date <= %s)
+                   GROUP BY 1, 2
+                   UNION ALL
+                   SELECT 'Khám định kỳ', date_trunc('month', e.examination_date)::date, COUNT(*)
+                   FROM public.medical_examination_generals e
+                   WHERE e.deleted_at IS NULL
+                     AND e.examination_date IS NOT NULL
+                     AND (%s::integer IS NULL OR e.school_id = %s)
+                     AND (%s::date IS NULL OR e.examination_date::date >= %s)
+                     AND (%s::date IS NULL OR e.examination_date::date <= %s)
+                   GROUP BY 1, 2
+                   UNION ALL
+                   SELECT 'Sự kiện tiêm chủng', date_trunc('month', v.date)::date, COUNT(*)
+                   FROM public.medical_vaccination_events v
+                   WHERE v.deleted_at IS NULL
+                     AND v.date IS NOT NULL
+                     AND (%s::integer IS NULL OR v.school_id = %s)
+                     AND (%s::date IS NULL OR v.date::date >= %s)
+                     AND (%s::date IS NULL OR v.date::date <= %s)
+                   GROUP BY 1, 2
+                   ORDER BY period, category""",
+                (
+                    school_filter, school_filter, start_filter, start_filter, end_filter, end_filter,
+                    school_filter, school_filter, start_filter, start_filter, end_filter, end_filter,
+                    school_filter, school_filter, start_filter, start_filter, end_filter, end_filter,
+                ),
+            ).fetchall()
+
+        def records(fields, rows):
+            return [
+                {name: json_value(value) for name, value in zip(fields, row)}
+                for row in rows
+            ]
+
+        return jsonify({
+            "filters": {
+                "from": start_date.isoformat() if start_date else None,
+                "to": end_date.isoformat() if end_date else None,
+                "school_id": school_id,
+            },
+            "schools": [{"id": row[0], "name": row[1]} for row in schools],
+            "metrics": {
+                "health_profiles": health[0],
+                "students_with_health_profiles": health[1],
+                "allergy_profiles": health[2],
+                "current_condition_profiles": health[3],
+                "quick_examinations": quick[0],
+                "students_with_quick_examinations": quick[1],
+                "parent_notifications_sent": quick[2],
+                "teacher_confirmations_pending": quick[3],
+                "periodic_examinations": exams[0],
+                "students_with_periodic_examinations": exams[1],
+                "average_bmi": float(exams[2]) if exams[2] is not None else None,
+                "examinations_with_bmi_conclusion": exams[3],
+                "bhyt_records": bhyt[0],
+                "students_with_bhyt": bhyt[1],
+                "bhyt_valid": bhyt[2],
+                "bhyt_expiring_soon": bhyt[3],
+                "bhyt_expired": bhyt[4],
+                "vaccination_events": vaccination[0],
+                "vaccination_records": vaccination[1],
+                "students_vaccinated": vaccination[2],
+                "medicine_records": medicine[0],
+                "medicine_details": medicine[1],
+                "active_medicine_records": medicine[2],
+            },
+            "series": records(["category", "period", "total"], series),
+        })
+    except psycopg.Error as exc:
+        return jsonify({"error": f"Không truy vấn được dữ liệu y tế: {exc}"}), 503
+
+
+@app.get("/dashboard/y-te")
+def medical_dashboard():
+    return render_template_string(MEDICAL_DASHBOARD)
+
+
 @app.get("/dashboard/ban-giam-hieu")
 def principal_tuition_dashboard():
     return render_template_string(DASHBOARD)
@@ -946,7 +1155,7 @@ start();
 
 DASHBOARD_HOME = """<!doctype html>
 <html lang="vi"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Dashboard học phí | Chọn đối tượng</title>
+<title>Dashboard nghiệp vụ nhà trường | Chọn đối tượng</title>
 <style>
 :root{font-family:"Segoe UI",Arial,sans-serif;color:#172033;background:#f3f6fb}*{box-sizing:border-box}
 body{margin:0}header{background:#172554;color:white;padding:26px max(24px,calc((100vw - 1120px)/2))}
@@ -960,13 +1169,14 @@ h2{margin:10px 0;font-size:21px}p{line-height:1.6}.link{display:inline-block;mar
 footer{max-width:1120px;margin:0 auto;padding:20px;color:#64748b;font-size:12px}
 @media(max-width:650px){.cards{grid-template-columns:1fr}main{margin:26px auto}}
 </style></head>
-<body><header><h1>Dashboard học phí</h1><p>Chọn đối tượng để xem bộ chỉ số và biểu đồ phù hợp.</p></header>
+<body><header><h1>Dashboard nghiệp vụ nhà trường</h1><p>Chọn phân hệ và đối tượng để xem bộ chỉ số phù hợp.</p></header>
 <main><p class="intro">Chọn một dashboard. Có thể bấm vào cột hoặc điểm dữ liệu để xem số liệu chi tiết tương ứng.</p>
 <section class="cards" aria-label="Chọn đối tượng dashboard">
  <a class="card" href="/dashboard/ban-giam-hieu"><span class="tag">Điều hành nhà trường</span><h2>Ban giám hiệu</h2><p>Tổng quan phải thu, thanh toán ghi nhận, dư nợ cuối kỳ, so sánh cơ sở và hoàn phí.</p><span class="link">Mở dashboard Ban giám hiệu →</span></a>
  <a class="card" href="/dashboard/truong-phong-ke-toan"><span class="tag">Đối soát và kiểm soát</span><h2>Trưởng phòng Kế toán</h2><p>Đối chiếu ghi nợ/ghi có, phương thức thanh toán, trạng thái giao dịch và chi tiết hoàn phí.</p><span class="link">Mở dashboard Kế toán →</span></a>
  <a class="card" href="/dashboard/ke-toan-vien"><span class="tag">Tra cứu nghiệp vụ</span><h2>Kế toán viên</h2><p>Tra cứu giao dịch theo học sinh, đối soát theo ngày hạch toán và kiểm tra chi tiết hoàn phí.</p><span class="link">Mở dashboard Kế toán viên →</span></a>
-</section></main><footer>Dashboard sử dụng dữ liệu học phí PostgreSQL trên máy cục bộ.</footer></body></html>"""
+ <a class="card" href="/dashboard/y-te"><span class="tag">Sức khỏe học đường</span><h2>Y tế học đường</h2><p>Theo dõi tổng hợp hồ sơ sức khỏe, khám nhanh, khám định kỳ, BHYT và sự kiện tiêm chủng; xem user story theo từng đối tượng.</p><span class="link">Mở dashboard Y tế →</span></a>
+</section></main><footer>Dashboard kết nối dữ liệu PostgreSQL trên máy cục bộ.</footer></body></html>"""
 
 
 ACCOUNTING_DASHBOARD = r"""<!doctype html>
@@ -1356,6 +1566,121 @@ search.addEventListener('input',()=>{clearTimeout(timer);timer=setTimeout(loadTa
 @app.get("/")
 def home():
     return render_template_string(PAGE)
+
+
+MEDICAL_DASHBOARD = r"""<!doctype html>
+<html lang="vi"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Y tế học đường | Dashboard</title>
+<style>
+:root{font-family:"Segoe UI",Arial,sans-serif;color:#172033;background:#f3f6fb}*{box-sizing:border-box}
+body{margin:0}header{background:#14532d;color:#fff;padding:24px max(24px,calc((100vw - 1360px)/2))}
+header h1{margin:0 0 5px;font-size:25px}header p{margin:0;color:#dcfce7}.home-link{display:inline-block;color:#dcfce7;font-size:13px;margin-bottom:10px;text-decoration:none}
+main{max-width:1360px;margin:22px auto;padding:0 20px}.toolbar{display:flex;gap:12px;align-items:end;flex-wrap:wrap;margin-bottom:14px;padding:14px;background:white;border:1px solid #dce8df;border-radius:10px}
+.toolbar label{font-size:13px;font-weight:600;color:#475569}.toolbar input,.toolbar select{display:block;margin-top:5px;padding:9px 10px;min-width:165px;border:1px solid #cbd5e1;border-radius:7px;font:inherit;background:white}
+button{font:inherit}.toolbar button{padding:10px 15px;border:0;border-radius:6px;background:#15803d;color:white;cursor:pointer}.toolbar button:disabled{opacity:.55;cursor:wait}
+.status{display:none;padding:13px;background:#fff7ed;color:#9a3412;border-radius:8px;margin-bottom:14px}
+.cards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:16px}.card,.panel,.story{background:white;border:1px solid #dce8df;border-radius:10px;box-shadow:0 3px 10px #12223b0a}
+.card{padding:15px}.card span{display:block;color:#64748b;font-size:13px}.card strong{display:block;margin-top:7px;font-size:21px;overflow-wrap:anywhere}
+.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.panel{padding:16px;margin-bottom:14px;min-width:0}.panel h2{font-size:17px;margin:0 0 5px}.panel>p{margin:0 0 10px;color:#64748b;font-size:12px}
+.chart svg{display:block;width:100%;height:auto;min-height:190px}.chart svg [data-clickable="true"]{cursor:pointer}.chart svg [data-clickable="true"]:hover{filter:brightness(.88)}
+.stories{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.story{padding:16px}.story h3{font-size:15px;margin:0 0 8px;color:#166534}.story p{margin:0 0 8px;line-height:1.5}.story .measure{font-size:12px;color:#64748b}
+.notice{padding:13px 15px;margin:0 0 16px;border-left:4px solid #d97706;background:#fffbeb;color:#713f12;border-radius:5px;font-size:13px;line-height:1.55}
+.muted{color:#64748b;font-size:12px}footer{padding:8px 0 28px;color:#64748b;font-size:12px;line-height:1.5}
+@media(max-width:900px){.cards{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:620px){header{padding:20px}main{padding:0 12px}.grid,.stories{grid-template-columns:1fr}.cards{gap:8px}.card{padding:11px}.card strong{font-size:18px}.toolbar label,.toolbar input,.toolbar select{width:100%}}
+</style></head>
+<body><header><a class="home-link" href="/dashboard">← Chọn phân hệ</a><h1>Dashboard Y tế học đường</h1><p>Tổng hợp dữ liệu sức khỏe, khám học đường, BHYT và tiêm chủng</p></header>
+<main>
+ <form class="toolbar" id="filters">
+  <label>Từ ngày<input id="fromDate" type="date"></label>
+  <label>Đến ngày<input id="toDate" type="date"></label>
+  <label>Cơ sở<select id="school"><option value="">Tất cả cơ sở</option></select></label>
+  <button id="loadButton" type="submit">Lọc dữ liệu</button>
+ </form>
+ <div id="status" class="status" role="alert"></div>
+ <p class="notice"><b>Lưu ý bảo mật:</b> Dashboard này chỉ hiển thị số liệu tổng hợp, không trả danh sách tên học sinh, triệu chứng, chẩn đoán hoặc thông tin liên hệ. Dữ liệu sức khỏe là dữ liệu nhạy cảm. User story cho giáo viên và phụ huynh là yêu cầu định hướng; cần xác thực, phân quyền theo học sinh/lớp và ghi nhật ký truy cập trước khi cung cấp dữ liệu cá nhân.</p>
+ <section class="cards" aria-label="Các chỉ số y tế tổng quan">
+  <div class="card"><span>Hồ sơ sức khỏe tạo trong khoảng lọc</span><strong id="healthProfiles">—</strong></div>
+  <div class="card"><span>Lượt khám nhanh</span><strong id="quickExams">—</strong></div>
+  <div class="card"><span>Lượt khám định kỳ</span><strong id="periodicExams">—</strong></div>
+  <div class="card"><span>Học sinh có BHYT chưa qua ngày hết hạn</span><strong id="bhytValid">—</strong></div>
+  <div class="card"><span>Hồ sơ BHYT hết hạn trong 30 ngày</span><strong id="bhytExpiring">—</strong></div>
+  <div class="card"><span>Sự kiện tiêm chủng</span><strong id="vaccinationEvents">—</strong></div>
+  <div class="card"><span>Lượt tiêm đã ghi nhận</span><strong id="vaccinationRecords">—</strong></div>
+  <div class="card"><span>Hồ sơ khám có kết luận BMI</span><strong id="bmiConclusions">—</strong></div>
+  <div class="card"><span>Hồ sơ thuốc đang theo dõi</span><strong id="medicineRecords">—</strong></div>
+  <div class="card"><span>Chi tiết thuốc được ghi nhận</span><strong id="medicineDetails">—</strong></div>
+ </section>
+ <section class="grid" aria-label="Biểu đồ hoạt động y tế">
+  <div class="panel chart"><h2>Khám nhanh theo tháng</h2><p>Bấm cột để lọc về tháng tương ứng. Biểu đồ không hiển thị chẩn đoán cá nhân.</p><div id="quickChart"></div></div>
+  <div class="panel chart"><h2>Khám định kỳ theo tháng</h2><p>Số lượt khám tổng hợp theo ngày khám trong nguồn dữ liệu.</p><div id="examChart"></div></div>
+  <div class="panel chart"><h2>Sự kiện tiêm chủng theo tháng</h2><p>Đếm sự kiện; đây không phải số học sinh đã tiêm.</p><div id="vaccineChart"></div></div>
+  <div class="panel"><h2>Tình trạng hồ sơ BHYT</h2><p id="bhytSummary">Đang tải dữ liệu...</p><h2 style="margin-top:18px">Thông tin sức khỏe tổng hợp</h2><p id="healthSummary">Đang tải dữ liệu...</p></div>
+ </section>
+ <section class="panel"><h2>User story theo đối tượng</h2><p>Các chỉ số bên dưới bám theo dữ liệu y tế hiện có; quyền xem dữ liệu cá nhân cần được thiết kế riêng.</p>
+  <div class="stories">
+   <article class="story"><h3>Ban giám hiệu</h3><p><b>Là Ban giám hiệu, tôi muốn theo dõi</b> quy mô hồ sơ sức khỏe, số lượt khám định kỳ/khám nhanh, tình hình BHYT và hoạt động tiêm chủng theo cơ sở và thời gian <b>để</b> ưu tiên nguồn lực, kế hoạch chăm sóc sức khỏe và phối hợp với phụ huynh.</p><div class="measure">Chỉ số: hồ sơ sức khỏe; lượt khám; BHYT còn hạn/sắp hết hạn; sự kiện và lượt tiêm đã ghi nhận.</div></article>
+   <article class="story"><h3>Trưởng bộ phận y tế học đường</h3><p><b>Là Trưởng bộ phận y tế, tôi muốn theo dõi</b> khối lượng khám, kết quả tổng hợp khám định kỳ, tình trạng thông báo cho phụ huynh và các hồ sơ BHYT cần lưu ý <b>để</b> điều phối nhân lực, lập kế hoạch theo dõi và báo cáo nhà trường.</p><div class="measure">Chỉ số: khám nhanh; khám định kỳ; kết luận BMI ở mức tổng hợp; trạng thái thông báo; BHYT sắp hết hạn.</div></article>
+   <article class="story"><h3>Nhân viên y tế / y tá trường học</h3><p><b>Là Nhân viên y tế, tôi muốn theo dõi</b> số lượt học sinh đến khám nhanh theo ngày/tháng và trạng thái gửi thông báo hoặc chờ xác nhận <b>để</b> sắp xếp công việc, kiểm tra các trường hợp cần tiếp tục xử lý.</p><div class="measure">Chỉ số: lượt khám nhanh; số học sinh có lượt khám; thông báo đã gửi; xác nhận giáo viên chủ nhiệm đang chờ.</div></article>
+   <article class="story"><h3>Bác sĩ / đơn vị khám sức khỏe</h3><p><b>Là Bác sĩ hoặc đơn vị khám, tôi muốn theo dõi</b> số lượt khám định kỳ, mức độ hoàn thành dữ liệu khám và phân bố kết luận sức khỏe ở dạng tổng hợp <b>để</b> phối hợp tổ chức khám, lập báo cáo và đề xuất hoạt động chăm sóc phù hợp.</p><div class="measure">Chỉ số: số lượt khám; số học sinh được khám; hồ sơ có kết luận BMI. Cần xác nhận mẫu số học sinh đủ điều kiện để tính tỷ lệ bao phủ.</div></article>
+   <article class="story"><h3>Phụ trách BHYT học sinh</h3><p><b>Là Người phụ trách BHYT, tôi muốn theo dõi</b> số hồ sơ BHYT có ngày hết hạn đã qua hoặc sắp đến theo cơ sở <b>để</b> rà soát và chủ động phối hợp gia hạn.</p><div class="measure">Chỉ số: hồ sơ BHYT; học sinh có ngày hết hạn chưa qua; hồ sơ hết hạn trong 30 ngày hoặc đã qua ngày hết hạn. Đây là phân loại theo ngày, không thay thế trạng thái nghiệp vụ trong hồ sơ.</div></article>
+   <article class="story"><h3>Điều phối tiêm chủng</h3><p><b>Là Người điều phối tiêm chủng, tôi muốn theo dõi</b> các sự kiện tiêm chủng và số lượt tiêm đã được ghi nhận theo thời gian <b>để</b> lập kế hoạch, rà soát việc cập nhật kết quả và phối hợp với gia đình.</p><div class="measure">Chỉ số: số sự kiện tiêm chủng; số bản ghi tiêm; số học sinh có bản ghi. Không suy ra tỷ lệ bao phủ nếu thiếu danh sách học sinh đủ điều kiện.</div></article>
+   <article class="story"><h3>Phụ trách quản lý thuốc tại trường</h3><p><b>Là Người phụ trách quản lý thuốc, tôi muốn theo dõi</b> số hồ sơ thuốc và chi tiết thuốc đang được ghi nhận <b>để</b> phối hợp bảo quản, sử dụng đúng hướng dẫn và kiểm tra các hồ sơ cần cập nhật.</p><div class="measure">Chỉ số: hồ sơ thuốc; chi tiết thuốc; hồ sơ thuốc có thời gian sử dụng hiện hành. Cần xác nhận quy trình và ý nghĩa của từng bản ghi.</div></article>
+   <article class="story"><h3>Giáo viên chủ nhiệm</h3><p><b>Là Giáo viên chủ nhiệm, tôi muốn xem</b> số trường hợp cần xác nhận thông báo y tế trong lớp được phân công <b>để</b> phối hợp phản hồi với nhân viên y tế và gia đình kịp thời.</p><div class="measure">Chỉ số định hướng: yêu cầu xác nhận đang chờ theo lớp. Chỉ triển khai sau khi có đăng nhập, phân quyền đúng lớp và chỉ hiển thị thông tin cần thiết.</div></article>
+   <article class="story"><h3>Phụ huynh / người giám hộ</h3><p><b>Là Phụ huynh, tôi muốn xem</b> hồ sơ sức khỏe, thông báo khám nhanh, lịch khám và thông tin tiêm chủng của chính con mình <b>để</b> phối hợp chăm sóc và cập nhật thông tin cần thiết cho nhà trường.</p><div class="measure">Chỉ số định hướng: hồ sơ và thông báo của con. Cần cổng đăng nhập, xác minh quan hệ giám hộ và kiểm soát quyền truy cập; chưa mở trên dashboard nội bộ này.</div></article>
+   <article class="story"><h3>Học sinh</h3><p><b>Là Học sinh, tôi muốn xem</b> lịch khám, thông tin chăm sóc sức khỏe phù hợp lứa tuổi và thông báo được phép chia sẻ <b>để</b> chủ động tham gia các hoạt động chăm sóc sức khỏe tại trường.</p><div class="measure">Chỉ số định hướng: lịch sự kiện và thông báo được phê duyệt. Cần tài khoản phù hợp độ tuổi, đồng ý của người giám hộ khi cần và chỉ hiển thị dữ liệu được phép.</div></article>
+   <article class="story"><h3>Phòng công tác học sinh / quản lý chăm sóc</h3><p><b>Là Người phụ trách công tác học sinh, tôi muốn theo dõi</b> số hồ sơ cần phối hợp hỗ trợ ở mức tổng hợp <b>để</b> kết nối nhà trường, bộ phận y tế và gia đình mà không tiếp cận vượt quá phạm vi dữ liệu được phép.</p><div class="measure">Chỉ số định hướng: số trường hợp cần phối hợp; yêu cầu phân quyền tối thiểu và quy trình xử lý dữ liệu sức khỏe.</div></article>
+  </div>
+ </section>
+ <footer>Nguồn dữ liệu: các bảng medical_* trong PostgreSQL. Bộ lọc thời gian áp dụng theo ngày khám/sự kiện hoặc ngày tạo hồ sơ tương ứng; hồ sơ không có ngày tạo không nằm trong thống kê theo khoảng ngày. Phân loại BHYT trong dashboard chỉ dựa trên ngày hết hạn, không thay thế trạng thái nghiệp vụ. Kết quả chỉ dùng nội bộ; không thay thế tư vấn y tế chuyên môn.</footer>
+</main>
+<script>
+const API="/api/medical/dashboard",numberFormat=new Intl.NumberFormat("vi-VN"),svgNS="http://www.w3.org/2000/svg";
+let currentData=null;
+function setMetric(id,value){document.getElementById(id).textContent=value===null||value===undefined?"—":numberFormat.format(value)}
+function drawChart(targetId,category,color){
+ const target=document.getElementById(targetId);target.replaceChildren();
+ const rows=(currentData.series||[]).filter(row=>row.category===category);
+ if(!rows.length){const empty=document.createElement("p");empty.className="muted";empty.textContent="Không có dữ liệu trong khoảng lọc.";target.appendChild(empty);return}
+ const W=680,H=225,L=48,R=12,T=18,B=44,pw=W-L-R,ph=H-T-B,slot=pw/rows.length,max=Math.max(1,...rows.map(row=>Number(row.total)||0)),svg=document.createElementNS(svgNS,"svg");
+ svg.setAttribute("viewBox",`0 0 ${W} ${H}`);svg.setAttribute("role","img");svg.setAttribute("aria-label",`${category} theo tháng`);target.appendChild(svg);
+ for(let n=0;n<=3;n++){const y=T+ph*n/3,line=document.createElementNS(svgNS,"line");line.setAttribute("x1",L);line.setAttribute("x2",W-R);line.setAttribute("y1",y);line.setAttribute("y2",y);line.setAttribute("stroke","#e8edf4");svg.appendChild(line);const label=document.createElementNS(svgNS,"text");label.setAttribute("x",L-6);label.setAttribute("y",y+4);label.setAttribute("text-anchor","end");label.setAttribute("fill","#64748b");label.setAttribute("font-size","10");label.textContent=numberFormat.format(Math.round(max*(3-n)/3));svg.appendChild(label)}
+ rows.forEach((row,index)=>{const value=Number(row.total)||0,h=Math.max(1,value/max*ph),width=Math.max(3,Math.min(28,slot*.64)),x=L+index*slot+(slot-width)/2,y=T+ph-h,rect=document.createElementNS(svgNS,"rect");rect.setAttribute("x",x);rect.setAttribute("y",y);rect.setAttribute("width",width);rect.setAttribute("height",h);rect.setAttribute("rx",3);rect.setAttribute("fill",color);rect.setAttribute("data-clickable","true");rect.setAttribute("tabindex","0");rect.setAttribute("role","button");const month=String(row.period).slice(0,7),title=document.createElementNS(svgNS,"title");title.textContent=`${month}: ${numberFormat.format(value)} · Bấm để lọc tháng`;rect.appendChild(title);const selectMonth=()=>{document.getElementById("fromDate").value=`${month}-01`;const lastDay=new Date(Number(month.slice(0,4)),Number(month.slice(5,7)),0).getDate();document.getElementById("toDate").value=`${month}-${String(lastDay).padStart(2,"0")}`;document.getElementById("filters").requestSubmit()};rect.addEventListener("click",selectMonth);rect.addEventListener("keydown",event=>{if(event.key==="Enter"||event.key===" "){event.preventDefault();selectMonth()}});svg.appendChild(rect);if(index%Math.max(1,Math.ceil(rows.length/8))===0||index===rows.length-1){const text=document.createElementNS(svgNS,"text");text.setAttribute("x",L+index*slot+slot/2);text.setAttribute("y",H-15);text.setAttribute("text-anchor","middle");text.setAttribute("fill","#475569");text.setAttribute("font-size","10");text.textContent=month;svg.appendChild(text)}});
+}
+function renderData(data){
+ currentData=data;const m=data.metrics;
+ setMetric("healthProfiles",m.health_profiles);setMetric("quickExams",m.quick_examinations);setMetric("periodicExams",m.periodic_examinations);setMetric("bhytValid",m.bhyt_valid);setMetric("bhytExpiring",m.bhyt_expiring_soon);setMetric("vaccinationEvents",m.vaccination_events);setMetric("vaccinationRecords",m.vaccination_records);setMetric("bmiConclusions",m.examinations_with_bmi_conclusion);setMetric("medicineRecords",m.medicine_records);setMetric("medicineDetails",m.medicine_details);
+ document.getElementById("bhytSummary").textContent=`${numberFormat.format(m.bhyt_records)} hồ sơ · ${numberFormat.format(m.bhyt_valid)} học sinh có ngày hết hạn chưa qua · ${numberFormat.format(m.bhyt_expiring_soon)} hồ sơ có ngày hết hạn trong 30 ngày tới · ${numberFormat.format(m.bhyt_expired)} hồ sơ có ngày hết hạn đã qua. Phân loại chỉ dựa trên ngày, không thay thế trạng thái nghiệp vụ.`;
+ document.getElementById("healthSummary").textContent=`${numberFormat.format(m.students_with_health_profiles)} học sinh có hồ sơ sức khỏe · ${numberFormat.format(m.allergy_profiles)} hồ sơ có ghi nhận dị ứng · ${numberFormat.format(m.current_condition_profiles)} hồ sơ có ghi nhận bệnh hiện tại.`;
+ drawChart("quickChart","Khám nhanh","#2563eb");drawChart("examChart","Khám định kỳ","#0f766e");drawChart("vaccineChart","Sự kiện tiêm chủng","#d97706");
+}
+async function loadData(event){
+ if(event)event.preventDefault();
+ const button=document.getElementById("loadButton"),status=document.getElementById("status");button.disabled=true;button.textContent="Đang tải...";status.style.display="none";
+ try{
+  const params=new URLSearchParams({from:document.getElementById("fromDate").value,to:document.getElementById("toDate").value,school_id:document.getElementById("school").value});
+  if(params.get("from")&&params.get("to")&&params.get("from")>params.get("to"))throw new Error("Ngày bắt đầu không được sau ngày kết thúc.");
+  const response=await fetch(`${API}?${params}`),data=await response.json();if(!response.ok)throw new Error(data.error||"Không tải được số liệu y tế.");
+  renderData(data);
+ }catch(error){status.textContent=`Không tải được dữ liệu y tế: ${error.message}`;status.style.display="block"}
+ finally{button.disabled=false;button.textContent="Lọc dữ liệu"}
+}
+async function start(){
+ const status=document.getElementById("status");
+ try{
+  const formatDate=value=>`${value.getFullYear()}-${String(value.getMonth()+1).padStart(2,"0")}-${String(value.getDate()).padStart(2,"0")}`;
+  const today=new Date(),end=formatDate(today),startDate=new Date(today);startDate.setFullYear(startDate.getFullYear()-3);
+  const start=formatDate(startDate);
+  document.getElementById("fromDate").value=start;document.getElementById("toDate").value=end;
+  const response=await fetch(`${API}?${new URLSearchParams({from:start,to:end})}`),schools=await response.json();
+  if(!response.ok)throw new Error(schools.error||"Không tải được danh mục cơ sở.");
+  if(!Array.isArray(schools.schools))throw new Error(schools.error||"Không tải được danh mục cơ sở.");
+  const select=document.getElementById("school");schools.schools.forEach(item=>{const option=document.createElement("option");option.value=item.id;option.textContent=item.name||`Cơ sở ${item.id}`;select.appendChild(option)});
+  document.getElementById("filters").addEventListener("submit",loadData);renderData(schools);
+ }catch(error){status.textContent=`Không tải được dashboard: ${error.message}`;status.style.display="block"}
+}
+start();
+</script></body></html>"""
 
 
 if __name__ == "__main__":

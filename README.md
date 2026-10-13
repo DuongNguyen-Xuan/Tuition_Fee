@@ -29,6 +29,8 @@ Dashboard Trưởng phòng Kế toán: `http://127.0.0.1:5000/dashboard/truong-p
 
 Dashboard Kế toán viên: `http://127.0.0.1:5000/dashboard/ke-toan-vien`. Tra cứu giao dịch theo mã/tên học sinh và khoảng ngày; xem đối soát theo ngày hạch toán và chi tiết hoàn phí. Dữ liệu mã/tên học sinh là thông tin cá nhân, chỉ dùng nội bộ.
 
+Dashboard Y tế học đường: `http://127.0.0.1:5000/dashboard/y-te`. Tổng hợp hồ sơ sức khỏe, khám nhanh/định kỳ, BHYT, tiêm chủng và hồ sơ thuốc theo khoảng ngày và cơ sở; biểu đồ theo tháng có thể bấm để lọc. Trang cũng ghi user story cho Ban giám hiệu, bộ phận/nhân viên y tế, đơn vị khám, phụ trách BHYT, điều phối tiêm chủng, giáo viên chủ nhiệm, phụ huynh, học sinh và công tác học sinh. API chỉ trả chỉ số tổng hợp, không trả danh sách học sinh hay nội dung chẩn đoán. Phân loại BHYT trong dashboard chỉ dựa trên ngày hết hạn, không thay thế trạng thái nghiệp vụ. Dữ liệu sức khỏe là dữ liệu nhạy cảm; ứng dụng hiện chưa có đăng nhập và phân quyền, do đó dashboard chỉ lắng nghe trên máy cục bộ và không được dùng để cấp quyền xem hồ sơ cá nhân.
+
 ## Lấy dữ liệu trong Power BI Desktop
 
 Chọn **Get Data → Web**, rồi nhập URL JSON của bảng muốn dùng. Ví dụ:
@@ -65,6 +67,7 @@ http://127.0.0.1:5000/api/accounting/dashboard?dataset=refunds
 - `/api/data?schema=bus&table=bus_route&limit=100&offset=0` — xem dữ liệu dạng JSON; `limit` tối đa 1.000.
 - `/api/powerbi?schema=bus&table=bus_route&limit=100000&offset=0` — JSON record list cho Power BI Web connector.
 - `/api/powerbi/tuition-monthly?from=2026-01-01&to=2026-09-01&school_id=1` — dữ liệu học phí tổng hợp theo trường-tháng cho Power BI; mọi bộ lọc đều tùy chọn.
+- `/api/medical/dashboard?from=2024-01-01&to=2026-12-31&school_id=1` — chỉ số y tế tổng hợp theo khoảng ngày và cơ sở; không trả dữ liệu nhận diện cá nhân.
 - `/export.csv?schema=bus&table=bus_route` — tùy chọn xuất CSV.
 - `POST /api/rows` — thêm dòng; body JSON gồm `schema`, `table`, `values`.
 - `PUT /api/rows` — sửa dòng; body JSON gồm `schema`, `table`, `key` (các cột khóa chính) và `values`.
